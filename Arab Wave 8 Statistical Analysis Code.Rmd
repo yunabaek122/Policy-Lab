@@ -1,0 +1,534 @@
+---
+title: "Arab_Barometer_Analysis"
+author: "Yuna Baek"
+date: "2025-03-14"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Libraries
+```{r}
+library(haven) 
+library(readr)
+library(dplyr)
+library(tidyr)
+library(corrplot)
+library(ggplot2)
+library(ggthemr)
+library(gplots)
+library(modelsummary)
+```
+
+```{r}
+path.to.data <- "/Users/yunabaek/Desktop/Harris/Year 2/2025 Winter/2. Policy Lab/Policy-Lab/Data/ArabBarometer_WaveVIII_English_v1.csv"
+arab_df <- read_csv(path.to.data)
+```
+
+
+```{r}
+# Function to generate correlation matrix heatmap
+create_heatmap <- function(cor_matrix, title) {
+  corrplot(cor_matrix,
+           method = "color",
+           type = "upper",
+           tl.col = "black",
+           tl.srt = 45,
+           addCoef.col = "black",
+           number.cex = 0.7,
+           title = title,
+           mar = c(0,0,2,0))
+}
+```
+
+### Data wrangling ### 
+```{r}
+# Recode 98, 99 as NA
+arab_df <- as.data.frame(lapply(arab_df, function(x) {
+  x[x %in% c(98, 99)] <- NA
+  return(x)
+}))
+```
+
+### Dependent Variable: Q551A ###
+```{r}
+# Dummy variable for Q551A
+for (i in 1:6) {
+  arab_df[[paste0("Q551A_", i)]] <- ifelse(is.na(arab_df$Q551A), NA, 
+                                           ifelse(arab_df$Q551A == i, 1, 0))
+}
+Q551A_vars <- grep("^Q551A_", names(arab_df), value = TRUE)
+```
+
+Demographics variables
+- Gender - Q1002: 1=male
+- Education - Q1003: 1=no formal educ, 2=elementary, 3=preparatory/basic, 4=secondary, 5=mid-level diploma, 6=BA, 7=MA&above
+- Urban/Rural - Q13: 1=urban, 2=rural, 3=camp
+```{r}
+arab_df$female <- ifelse(is.na(arab_df$Q1002), NA, ifelse(arab_df$Q1002 == 1, 0, 1)) # If male, 0
+arab_df$secondary <- ifelse(is.na(arab_df$Q1003), NA, ifelse(arab_df$Q1003 >= 4, 1, 0)) # If higher than or equal to secondary, 1
+arab_df$rural <- ifelse(is.na(arab_df$Q13), NA, ifelse(arab_df$Q13 == 2, 1, 0)) # If 1, rural
+```
+
+Balance test of demographics against Q551A
+```{r}
+balance_test <- function(df, group_var, outcome_var) {
+  tmp <- df %>%
+    filter(!is.na({{group_var}}), !is.na({{outcome_var}})) %>%
+    group_by({{group_var}}) %>%
+    summarise(
+      Count = sum({{outcome_var}}, na.rm = TRUE),  # sum of 1's
+      N     = n(),                                 # total rows
+      .groups = "drop"
+    ) %>%
+    mutate(Prop = Count / N)
+  
+  out <- tmp %>%
+    summarise(
+      Group0_Prop  = ifelse(any({{group_var}} == 0), Prop[{{group_var}} == 0], NA),
+      Group1_Prop  = ifelse(any({{group_var}} == 1), Prop[{{group_var}} == 1], NA),
+      Group0_Count = ifelse(any({{group_var}} == 0), Count[{{group_var}} == 0], NA),
+      Group1_Count = ifelse(any({{group_var}} == 1), Count[{{group_var}} == 1], NA),
+      Group0_Total = ifelse(any({{group_var}} == 0), N[{{group_var}} == 0], NA),
+      Group1_Total = ifelse(any({{group_var}} == 1), N[{{group_var}} == 1], NA)
+    )
+  
+  # Two‐proportion z‐test p-value
+  out <- out %>%
+    mutate(
+      p_value = if (!is.na(Group0_Count) && !is.na(Group1_Count) &&
+                    Group0_Count > 0 && Group1_Count > 0) {
+        prop.test(
+          x = c(Group0_Count, Group1_Count),
+          n = c(Group0_Total, Group1_Total),
+          correct = FALSE
+        )$p.value
+      } else {
+        NA
+      }
+    )
+  
+  out
+}
+
+results <- lapply(1:6, function(i) {
+  var_name <- paste0("Q551A_", i)
+  
+  # -- Gender
+  tmp_gender <- balance_test(arab_df, female, !!sym(var_name)) %>%
+    rename(
+      Male_Prop   = Group0_Prop,
+      Female_Prop = Group1_Prop,
+      p_gender    = p_value
+    )
+  
+  # -- Setting
+  tmp_rural <- balance_test(arab_df, rural, !!sym(var_name)) %>%
+    rename(
+      Urban_Prop = Group0_Prop,
+      Rural_Prop = Group1_Prop,
+      p_rural    = p_value
+    )
+  
+  # -- Education
+  tmp_edu <- balance_test(arab_df, secondary, !!sym(var_name)) %>%
+    rename(
+      Low_Prop  = Group0_Prop,
+      High_Prop = Group1_Prop,
+      p_edu     = p_value
+    )
+
+  data.frame(
+    Q551A_i = i,
+    Male = tmp_gender$Male_Prop,
+    Female = tmp_gender$Female_Prop,
+    p_value_gender = tmp_gender$p_gender,
+    
+    Urban = tmp_rural$Urban_Prop,
+    Rural = tmp_rural$Rural_Prop,
+    p_value_rural = tmp_rural$p_rural,
+    
+    Low = tmp_edu$Low_Prop,
+    High = tmp_edu$High_Prop,
+    p_value_edu = tmp_edu$p_edu
+  )
+}) %>%
+  bind_rows()
+results <- results %>%
+  mutate(
+    Male      = round(Male * 100, 1),
+    Female    = round(Female * 100, 1),
+    Urban     = round(Urban * 100, 1),
+    Rural     = round(Rural * 100, 1),
+    Low       = round(Low * 100, 1),
+    High      = round(High * 100, 1),
+      Q551A_label = case_when(
+      Q551A_i == 1 ~ "Equality under the law",
+      Q551A_i == 2 ~ "Absence of corruption",
+      Q551A_i == 3 ~ "Basic necessities available",
+      Q551A_i == 4 ~ "Free election choice",
+      Q551A_i == 5 ~ "Safety from danger",
+      Q551A_i == 6 ~ "Civil rights guaranteed",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  select(Q551A_i, Q551A_label, everything())
+
+print(results)
+```
+
+Financial Stability - Converting to binary variables
+```{r}
+# income stability = 1 if "able to save / no difficulties", 0 if "face some / significant difficulties"
+arab_df$income_stability <- ifelse(is.na(arab_df$Q1016), NA, 
+                                   ifelse(arab_df$Q1016 %in% c(1, 2), 1, 0))
+
+arab_df$has_savings <- ifelse(is.na(arab_df$Q116), NA, 
+                              ifelse(arab_df$Q116 == 1, 1, 0))
+arab_df$bank_account <- ifelse(is.na(arab_df$Q1025), NA, 
+                               ifelse(arab_df$Q1025 == 1, 1, 0))
+
+# 1 if own current place of residence
+arab_df$hh_own <- ifelse(is.na(arab_df$Q1001G), NA, 
+                         ifelse(arab_df$Q1001G == 1, 0, 1))
+
+# if own current house & has no mortgage = 1
+arab_df$home_own_no_mortgage <- ifelse(is.na(arab_df$Q1001H), NA, 
+                                       ifelse(arab_df$Q1001H == 1, 0, 1))
+
+arab_df$above_median_income <- ifelse(is.na(arab_df$Q1015A), NA, 
+                                      ifelse(arab_df$Q1015A == 2, 1, 0))
+
+stable_jobs <- c(1, 2, 4, 6)  # Salaried, stable hourly income, rent/financial products
+arab_df$employment_stability <- ifelse(is.na(arab_df$Q1021), NA, 
+                                    ifelse(arab_df$Q1021 %in% stable_jobs, 1, 0))
+
+pca_vars <- c("income_stability", "has_savings", "bank_account", "hh_own", 
+              "home_own_no_mortgage", "above_median_income","employment_stability")
+```
+
+Histogram of financial variables distribution
+```{r}
+library(gridExtra) 
+
+# Function to create bar plots including NA values
+plot_bar <- function(variable, title) {
+  variable <- factor(variable, levels = unique(c(variable, NA)), exclude = NULL)
+  data_tbl <- as.data.frame(table(variable, useNA = "always"))
+  data_tbl$variable <- as.character(data_tbl$variable)
+  data_tbl$variable[is.na(data_tbl$variable)] <- "NA"
+  # Create bar plot
+  ggplot(data_tbl, aes(x = variable, y = Freq)) +
+    geom_bar(stat = "identity", fill = "skyblue", alpha = 0.7) +
+    labs(title = title, x = "Binary Response", y = "Frequency") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(hjust = 1))
+}
+
+# Generate bar plots
+p1 <- plot_bar(arab_df$income_stability, "Income Stability")
+p2 <- plot_bar(arab_df$has_savings, "Have Savings")
+p3 <- plot_bar(arab_df$bank_account, "Own a Bank Account")
+p4 <- plot_bar(arab_df$hh_own, "Own Current Place of Residence")
+p5 <- plot_bar(arab_df$home_own_no_mortgage, "Own Home & No Mortgage")
+p6 <- plot_bar(arab_df$above_median_income, "Less or More Than Median Income")
+p7 <- plot_bar(arab_df$employment_stability, "Employment Stability")
+
+# Print plots
+grid.arrange(p1, p2, p3, p4, p5, p6, p7, ncol = 2)
+```
+
+Basic necessities: Reversing, correlation 
+```{r}
+# Basic necessities
+# Reverse coding for Basic Necessities variables (Higher = Worse Condition)
+arab_df <- arab_df %>% 
+  mutate(
+    # Q130: Food Insecurity Indicator (Binary: 0 = Any Coping Mechanism Used, 1 = Not food insecure)
+    Q130_r = if_else(Q130_2 == 1 | Q130_3 == 1 | Q130_4 == 1 | Q130_5 == 1, 0, 1, missing = NA_real_)
+    )
+
+# Replace 97 with NA
+arab_df[c("Q540B_3", "Q274A", "Q274B")] <- lapply(arab_df[c("Q540B_3", "Q274A", "Q274B")], function(x) {
+  x[x %in% c(97)] <- NA
+  return(x)
+})
+
+necessities_vars <- c("Q129A_1", "Q129A_2", "Q130_r", "Q112_2",
+                      "Q540B_3", "Q274A", "Q274B")
+
+necessities_cors <- cor(arab_df[necessities_vars],
+                       use = "pairwise.complete.obs",
+                       method = "spearman")
+
+necessities_vars <- c("Q129A_1", "Q129A_2", "Q130_r", "Q112_2",
+                      "Q540B_3", "Q274A", "Q274B")
+
+
+create_heatmap(necessities_cors, "Correlations: Basic Necessities")
+
+```
+
+
+### Creating SES Indices ###
+
+# Food security index
+```{r}
+# Scaling [0, 1]
+library(caret)
+
+# Food security & access to services
+# Selecting indices based on correlation results
+food_security_vars <- c("Q129A_1", "Q129A_2", "Q130_r", "Q112_2")
+access_vars <- c("Q540B_3", "Q274A", "Q274B")
+columns_to_scale <- c(food_security_vars, access_vars)
+
+# Apply scaling to selected columns
+scale_model <- preProcess(arab_df[, columns_to_scale], method = c("range"))
+scaled_data <- predict(scale_model, arab_df[, columns_to_scale])
+
+# Add new scaled columns to arab_df with names Q129A_1_scaled
+arab_df[, paste0(columns_to_scale, "_scaled")] <- scaled_data
+
+# Summary index
+arab_df$food_security_index <- rowMeans(arab_df[paste0(food_security_vars, "_scaled")], na.rm = TRUE)
+arab_df$access_index <- rowMeans(arab_df[paste0(access_vars, "_scaled")], na.rm = TRUE)
+```
+
+
+Correlation matrix of SES variables
+```{r}
+financial_cors <- cor(arab_df[c(pca_vars, "food_security_index", "access_index", "secondary")],
+                       use = "pairwise.complete.obs",
+                       method = "spearman")
+
+# Create the heatmap for the Absence of Corruption correlations
+create_heatmap(financial_cors, "Correlations: SES Variables")
+```
+
+Summary Index 1: financial stability index
+```{r}
+# Mean index using Q1001G, Q1025, Q1016; binary vars 
+arab_df$financial_stability_index <-  rowSums(
+  arab_df[, c("income_stability", "has_savings", "bank_account")], 
+  na.rm = TRUE
+)
+```
+
+Quartile for binary conversion
+```{r}
+# Calculate quartile cutoffs
+financial_quartiles <- quantile(arab_df$financial_stability_index, probs = c(0.25, 0.75), na.rm = TRUE)
+
+# Assign quartile-based categories (Low, Middle, High)
+arab_df$financial_quartiles <- cut(arab_df$financial_stability_index, 
+                            breaks = c(-Inf, financial_quartiles[1], financial_quartiles[2], Inf), 
+                            labels = c("Low", "Middle", "High"),
+                            include.lowest = TRUE)
+
+# Check distribution
+table(arab_df$financial_quartiles, useNA = "always")
+
+# Create binary financial stability variable: High = Top 25%, Low = Bottom 75%
+arab_df$financial_binary <- ifelse(is.na(arab_df$financial_stability_index), NA,
+                             ifelse(arab_df$financial_stability_index >= financial_quartiles[2], 1, 0))
+
+# Check distribution
+table(arab_df$financial_binary, useNA = "always")
+```
+
+Summary Index 2: economic stability index based on the high correlation coefficients
+```{r}
+# Mean index using two binary vars & food security index
+arab_df$econ_stability_index <-  rowSums(
+  arab_df[, c("income_stability", "above_median_income", "food_security_index")], 
+  na.rm = TRUE
+)
+```
+
+Alternative option: using median or quartile cutoffs to convert indices to binary indices
+```{r}
+# Calculate quartile cutoffs
+econ_quartiles <- quantile(arab_df$econ_stability_index, probs = c(0.25, 0.75), na.rm = TRUE)
+
+# Assign quartile-based categories (Low, Middle, High)
+arab_df$econ_quartiles <- cut(arab_df$econ_stability_index, 
+                            breaks = c(-Inf, econ_quartiles[1], econ_quartiles[2], Inf), 
+                            labels = c("Low", "Middle", "High"),
+                            include.lowest = TRUE)
+
+# Check distribution
+table(arab_df$econ_quartiles, useNA = "always")
+
+# Create binary financial stability variable: High = Top 25%, Low = Bottom 75%
+arab_df$econ_binary <- ifelse(is.na(arab_df$econ_stability_index), NA,
+                             ifelse(arab_df$econ_stability_index >= econ_quartiles[2], 1, 0))
+
+# Check distribution
+table(arab_df$econ_binary, useNA = "always")
+```
+
+
+# Regression Analysis
+## Logit Model Summary Table with Q551A_i as dependent variables
+Function: run_glm_models
+```{r}
+# Define dependent and demographic variables
+dep_vars <- Q551A_vars
+dem_vars <- c("female", "secondary", "rural")
+
+# Define custom labels for dependent variables
+dep_labels <- c(
+  "Q551A_1" = "Equality under the law",
+  "Q551A_2" = "Absence of corruption",
+  "Q551A_3" = "Basic necessities",
+  "Q551A_4" = "Freely choose political leaders",
+  "Q551A_5" = "Physical safety",
+  "Q551A_6" = "Basic civil rights"
+)
+
+# Function inputs: independent vars, disc_labels, table title
+run_glm_models <- function(indep_vars, disc_labels, title) {
+  models_list <- list()
+
+  for (dep in dep_vars) {
+    # Regression input formula
+    fml <- as.formula(paste(dep, "~", paste(indep_vars, collapse = " + ")))
+
+    # Subset to complete cases
+    subset_data <- arab_df[complete.cases(arab_df[, c(dep, indep_vars)]), ]
+
+    # Check that there is data and that the dependent variable has at least 2 unique values
+    if (nrow(subset_data) == 0 || length(unique(subset_data[[dep]])) < 2) {
+      models_list[[dep_labels[dep]]] <- NA
+    } else {
+      model <- glm(fml, data = subset_data, family = binomial, na.action = na.omit)
+      models_list[[dep_labels[dep]]] <- model # mar5 5:21pm
+      DescTools::PseudoR2(model, which = "all")
+    }
+  }
+
+# Generate the regression table
+  modelsummary(models_list,
+               stars = TRUE,
+               title = title,
+               coef_map = disc_labels)
+}
+```
+
+
+GLM model: Demographic variables on Q551A
+```{r}
+dem_labels <- c(
+  "female" = "Female",
+  "secondary" = "Secondary Education",
+  "rural" = "Rural"
+)
+run_glm_models(dem_vars, dem_labels, "Logit: Q551A and Demographic Variables")
+```
+
+Food Security Index
+```{r}
+indep_vars_1 <- c("food_security_index")
+food_security <- run_glm_models(indep_vars_1, disc_labels_1, "Logit: SES Indices")
+```
+
+```{r}
+# Model with demographic variables
+indep_vars_1 <- c("food_security_index")
+disc_labels_1 <- c(
+  "food_security_index" = "Food Security Index"
+)
+run_glm_models(indep_vars_1, disc_labels_1, "Logit: Indices without Demographic Controls")
+
+# Model without demographic variables
+indep_vars_2 <- c(indep_vars_1, dem_vars)
+disc_labels_2 <- c(disc_labels_1, dem_labels)
+run_glm_models(indep_vars_2, disc_labels_2, "Logit: Indices with Demographic Controls")
+
+```
+
+
+
+## Interaction Term Logit Model Summary Table with Q551A_i as dependent variables
+glm_int_models
+interaction terms = demographic variables (demo_vars)
+```{r}
+# inputs: independent vars, demographic vars (interaction), disc_labels, title 
+glm_int_models <- function(indep_vars, demo_vars, disc_labels, title) {
+  models_list <- list()
+  
+  for (dep in dep_vars) {
+    # Create main effects: combine independent and demographic variables
+    main_effects <- paste(c(indep_vars, demo_vars), collapse = " + ")
+    
+    # Create interaction terms for each independent variable with each demographic variable
+    interaction_terms <- c()
+    for (indep in indep_vars) {
+      for (demo in demo_vars) {
+        interaction_terms <- c(interaction_terms, paste0(indep, ":", demo))
+      }
+    }
+    
+    # Combine main effects and interaction terms into a full regression formula
+    fml_str <- paste(dep, "~", main_effects, "+", paste(interaction_terms, collapse = " + "))
+    fml <- as.formula(fml_str)
+    
+    # Subset data to complete cases for the dependent variable, independent variables, and demo variables
+    subset_data <- arab_df[complete.cases(arab_df[, c(dep, indep_vars, demo_vars)]), ]
+    
+    # Check for sufficient data and variation in the dependent variable
+    if (nrow(subset_data) == 0 || length(unique(subset_data[[dep]])) < 2) {
+      models_list[[dep_labels[dep]]] <- NA
+    } else {
+      model <- glm(fml, data = subset_data, family = binomial, na.action = na.omit)
+      models_list[[dep_labels[dep]]] <- model
+    }
+  }
+  
+  # Generate the regression table with the specified coefficient labels
+  modelsummary(models_list,
+               stars = TRUE,
+               title = title,
+               coef_map = disc_labels)
+}
+```
+
+
+```{r}
+### Regression with interaction terms with demographic variables
+
+# Define independent and demographic variables
+indep_vars <- c("food_security_index")
+demo_vars <- c("female", "secondary", "rural")
+
+# Define labels for the main effects
+disc_labels <- c(
+  "food_security_index" = "Food Security Index",
+  "female" = "Female",
+  "secondary" = "Secondary Education",
+  "rural" = "Rural"
+)
+
+# Create dynamic labels for each interaction term (e.g., "Water & Electricity Access Index × Female")
+interaction_labels <- c()
+for (indep in indep_vars) {
+  for (demo in demo_vars) {
+    interaction_term <- paste0(indep, ":", demo)
+    interaction_labels[interaction_term] <- paste0(disc_labels[indep], " × ", disc_labels[demo])
+  }
+}
+
+# Add the interaction labels to the coefficient labels list
+disc_labels <- c(disc_labels, interaction_labels)
+
+# Call the function to run the models with interaction terms
+glm_int_models(indep_vars, demo_vars, disc_labels, "Logit: Q551A and Demographic Variables with Interactions")
+
+```
+
+
+
